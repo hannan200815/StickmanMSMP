@@ -26,6 +26,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
@@ -56,7 +57,13 @@ import org.bukkit.entity.Item;
 import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+import org.bukkit.boss.BossBar;
+import org.bukkit.boss.BarColor;
+import org.bukkit.boss.BarStyle;
+import org.bukkit.inventory.EquipmentSlotGroup;
+import org.bukkit.event.player.PlayerAdvancementDoneEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.Vector;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
@@ -110,6 +117,19 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     private String ctfWorld;
     private int ctfX, ctfY, ctfZ;
     private UUID flagCarrier;
+    private static final int CTF_AREA_R = 48;
+    private static final int CTF_AREA_H = 40;
+    private static final int CTF_PLATEAU = 12;
+    private boolean ctfAreaBuilt, ctfAreaBusy;
+    private String ctfAreaWorld, ctfAreaName;
+    private int ctfAreaX, ctfAreaY, ctfAreaZ;
+    private final Map<String, Long> eventEnds = new HashMap<>();
+    private final Map<UUID, Double> tungSavedMax = new HashMap<>();
+    private final Map<UUID, BossBar> tungBars = new HashMap<>();
+    private final Map<UUID, Long> tungCooldown = new HashMap<>();
+    private NamespacedKey tungKey, tungDamageKey;
+    private NamespacedKey moneyStandKey;
+    private final Map<UUID, ArmorStand> moneyStands = new HashMap<>();
 
     // Finale: the world border shrinks to a chosen area
     private String finaleWorld;
@@ -124,6 +144,32 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     private boolean glaDirty;
     private Location glaSpawnA, glaSpawnB;
     private String glaTeamA, glaTeamB;
+    private String glaArenaName;
+    private boolean glaAwaitingConfirm;
+    private final Set<String> teamNames = new HashSet<>();
+    private final Map<String, String> teamColours = new HashMap<>();
+    private final Map<String, Set<String>> teamStyles = new HashMap<>();
+    private static final Map<String, String> COLOUR_NAMES = new LinkedHashMap<>();
+    static {
+        COLOUR_NAMES.put("black", "#000000");
+        COLOUR_NAMES.put("darkblue", "#0000AA");
+        COLOUR_NAMES.put("darkgreen", "#00AA00");
+        COLOUR_NAMES.put("darkaqua", "#00AAAA");
+        COLOUR_NAMES.put("darkred", "#AA0000");
+        COLOUR_NAMES.put("darkpurple", "#AA00AA");
+        COLOUR_NAMES.put("gold", "#FFAA00");
+        COLOUR_NAMES.put("gray", "#AAAAAA");
+        COLOUR_NAMES.put("darkgray", "#555555");
+        COLOUR_NAMES.put("blue", "#5555FF");
+        COLOUR_NAMES.put("green", "#55FF55");
+        COLOUR_NAMES.put("aqua", "#55FFFF");
+        COLOUR_NAMES.put("red", "#FF5555");
+        COLOUR_NAMES.put("pink", "#FF69B4");
+        COLOUR_NAMES.put("yellow", "#FFFF55");
+        COLOUR_NAMES.put("white", "#FFFFFF");
+        COLOUR_NAMES.put("orange", "#FFA500");
+        COLOUR_NAMES.put("brown", "#8B4513");
+    }
     private String glaKit;
     private boolean glaActive, glaFighting, glaSpinning;
     private final Set<UUID> glaSideA = new HashSet<>();
@@ -197,12 +243,31 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         Bukkit.getScheduler().runTaskTimer(this, this::tick, 20L, 20L);
         Bukkit.getScheduler().runTaskTimer(this, this::captureTick, 20L, 20L);
         Bukkit.getScheduler().runTaskTimer(this, this::ctfTick, 20L, 20L);
+        Bukkit.getScheduler().runTaskTimer(this, this::eventTimers, 20L, 20L);
         ctfKey = new NamespacedKey(this, "ctf-flag");
+        tungKey = new NamespacedKey(this, "tung-bat");
+        moneyStandKey = new NamespacedKey(this, "money-stand");
+        for (World w : Bukkit.getWorlds()) {
+            for (ArmorStand st : w.getEntitiesByClass(ArmorStand.class)) {
+                if (st.getPersistentDataContainer().has(moneyStandKey, PersistentDataType.BYTE)) st.remove();
+            }
+        }
+        Bukkit.getScheduler().runTaskTimer(this, this::moneyStandTick, 2L, 2L);
+        tungDamageKey = new NamespacedKey(this, "tung-damage");
+        Bukkit.getScheduler().runTaskTimer(this, this::tungTick, 10L, 10L);
+        if (getCommand("becometungtung") != null) getCommand("becometungtung").setExecutor(this);
+        if (getCommand("becomeplayeragain") != null) getCommand("becomeplayeragain").setExecutor(this);
         for (Player p : Bukkit.getOnlinePlayers()) refresh(p);
     }
 
     @Override
     public void onDisable() {
+        for (ArmorStand st : moneyStands.values()) if (st.isValid()) st.remove();
+        moneyStands.clear();
+        for (UUID id : new ArrayList<>(tungSavedMax.keySet())) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) endTung(p);
+        }
         saveData();
     }
 
@@ -253,6 +318,12 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             for (String team : scoreSec.getKeys(false)) scores.put(team, scoreSec.getInt(team));
         }
         ctfBuilt = data.getBoolean("ctf.built", false);
+        ctfAreaBuilt = data.getBoolean("ctf.area.built", false);
+        ctfAreaWorld = data.getString("ctf.area.world");
+        ctfAreaName = data.getString("ctf.area.name");
+        ctfAreaX = data.getInt("ctf.area.x");
+        ctfAreaY = data.getInt("ctf.area.y");
+        ctfAreaZ = data.getInt("ctf.area.z");
         glaSpawnA = data.getLocation("gladiators.a");
         glaSpawnB = data.getLocation("gladiators.b");
         glaTeamA = data.getString("gladiators.team-a");
@@ -260,6 +331,15 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         glaCentre = data.getLocation("gladiators.centre");
         glaSky = data.getBoolean("gladiators.sky", false);
         glaDirty = data.getBoolean("gladiators.dirty", false);
+        glaArenaName = data.getString("gladiators.arena-name");
+        teamNames.clear();
+        teamNames.addAll(data.getStringList("team-names"));
+        teamColours.clear();
+        teamStyles.clear();
+        ConfigurationSection tcSec = data.getConfigurationSection("team-colours");
+        if (tcSec != null) for (String t : tcSec.getKeys(false)) teamColours.put(t, tcSec.getString(t));
+        ConfigurationSection tsSec = data.getConfigurationSection("team-styles");
+        if (tsSec != null) for (String t : tsSec.getKeys(false)) teamStyles.put(t, new HashSet<>(tsSec.getStringList(t)));
         gladKits.clear();
         ConfigurationSection kitSec = data.getConfigurationSection("gladiator-kits");
         if (kitSec != null) {
@@ -298,6 +378,12 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         for (int i = 0; i < 6; i++) out.set("capture.captured." + i, captured[i]);
         for (Map.Entry<String, Integer> en : scores.entrySet()) out.set("scores." + en.getKey(), en.getValue());
         out.set("ctf.built", ctfBuilt);
+        out.set("ctf.area.built", ctfAreaBuilt);
+        out.set("ctf.area.world", ctfAreaWorld);
+        out.set("ctf.area.name", ctfAreaName);
+        out.set("ctf.area.x", ctfAreaX);
+        out.set("ctf.area.y", ctfAreaY);
+        out.set("ctf.area.z", ctfAreaZ);
         out.set("gladiators.a", glaSpawnA);
         out.set("gladiators.b", glaSpawnB);
         out.set("gladiators.team-a", glaTeamA);
@@ -305,6 +391,10 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         out.set("gladiators.centre", glaCentre);
         out.set("gladiators.sky", glaSky);
         out.set("gladiators.dirty", glaDirty);
+        out.set("gladiators.arena-name", glaArenaName);
+        out.set("team-names", new ArrayList<>(teamNames));
+        for (Map.Entry<String, String> en : teamColours.entrySet()) out.set("team-colours." + en.getKey(), en.getValue());
+        for (Map.Entry<String, Set<String>> en : teamStyles.entrySet()) out.set("team-styles." + en.getKey(), new ArrayList<>(en.getValue()));
         for (Map.Entry<String, ItemStack[]> en : gladKits.entrySet()) out.set("gladiator-kits." + en.getKey(), Arrays.asList(en.getValue()));
         out.set("finale.world", finaleWorld);
         out.set("finale.x", finaleX);
@@ -374,7 +464,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     private String tierPrefix(String tier) {
         String hex = getConfig().getString("tier-colors." + tier, "#FFFFFF");
-        return hexCode(hex) + "" + ChatColor.BOLD + tier + " TIER " + ChatColor.RESET;
+        return hexCode(hex) + "" + "" + tier + " TIER " + ChatColor.RESET;
     }
 
     /** One scoreboard team per player, holding the tier (prefix) and money (suffix) above their name. */
@@ -391,51 +481,23 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     private void refresh(Player p) {
         boolean anon = eventOn("anonymous");
         String tier = tiers.get(p.getUniqueId());
-        String prefix = anon || tier == null ? "" : tierPrefix(tier);
+        String team = teams.get(p.getUniqueId());
+        String teamPart = (!anon && team != null) ? " " + teamDisplay(team) : "";
+        String tierPart = (!anon && tier != null) ? " " + tierPrefix(tier).trim() : "";
         Team t = teamFor(p);
-        t.setPrefix(prefix);
-        t.setSuffix(anon ? "" : ChatColor.GREEN + "" + ChatColor.BOLD + " $" + balance(p.getUniqueId()));
+        t.setPrefix("");
+        t.setSuffix(anon ? "" : teamPart + tierPart);
         t.setOption(Team.Option.NAME_TAG_VISIBILITY, anon ? Team.OptionStatus.NEVER : Team.OptionStatus.ALWAYS);
-        p.setPlayerListName(anon ? ChatColor.GRAY + "Anonymous" : prefix + ChatColor.BOLD + p.getName());
+        p.setPlayerListName(anon ? ChatColor.GRAY + "Anonymous" : p.getName() + teamPart + tierPart);
     }
 
     // ---------- Debt and wealth effects ----------
 
+    /** Debt debuffs were removed. This only clears any heart penalty left over from before. */
     private void applyEffects(Player p, long bal) {
-        Map<PotionEffectType, Integer> want = new HashMap<>();
-        int heartsLost = 0;
-        if (bal < 0) want.put(PotionEffectType.SLOWNESS, 0);
-        if (bal <= -100) {
-            want.put(PotionEffectType.WEAKNESS, 0);
-            heartsLost = 2;
-        }
-        if (bal <= -250) {
-            want.put(PotionEffectType.SLOWNESS, 1);
-            want.put(PotionEffectType.WEAKNESS, 1);
-            heartsLost = 4;
-        }
-        if (bal >= 500) want.put(PotionEffectType.STRENGTH, 0);
-        if (bal >= 1000) {
-            want.put(PotionEffectType.STRENGTH, 1);
-            want.put(PotionEffectType.SPEED, 0);
-        }
-
-        for (Map.Entry<PotionEffectType, Integer> en : want.entrySet()) {
-            p.addPotionEffect(new PotionEffect(en.getKey(), (int) EFFECT_DURATION_TICKS, en.getValue(), false, false, true));
-        }
-        for (PotionEffectType type : MANAGED) {
-            if (!want.containsKey(type) && p.hasPotionEffect(type)) p.removePotionEffect(type);
-        }
-
         AttributeInstance maxHealth = p.getAttribute(Attribute.GENERIC_MAX_HEALTH);
-        if (maxHealth == null) return;
         AttributeModifier old = heartMods.remove(p.getUniqueId());
-        if (old != null) maxHealth.removeModifier(old);
-        if (heartsLost > 0) {
-            AttributeModifier mod = new AttributeModifier(heartKey, -2.0 * heartsLost, AttributeModifier.Operation.ADD_NUMBER);
-            maxHealth.addModifier(mod);
-            heartMods.put(p.getUniqueId(), mod);
-        }
+        if (old != null && maxHealth != null) maxHealth.removeModifier(old);
     }
 
     private void tick() {
@@ -453,6 +515,152 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         }
     }
 
+    // ---------- Money above names ----------
+
+    private ArmorStand spawnMoneyStand(Player p) {
+        return p.getWorld().spawn(p.getLocation(), ArmorStand.class, st -> {
+            st.setMarker(true);
+            st.setInvisible(true);
+            st.setGravity(false);
+            st.setSmall(true);
+            st.setInvulnerable(true);
+            st.setCustomNameVisible(true);
+            st.getPersistentDataContainer().set(moneyStandKey, PersistentDataType.BYTE, (byte) 1);
+        });
+    }
+
+    /** Keeps each player's balance floating above their head. */
+    private void moneyStandTick() {
+        boolean anon = eventOn("anonymous");
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            ArmorStand st = moneyStands.get(p.getUniqueId());
+            if (st == null || !st.isValid() || !st.getWorld().equals(p.getWorld())) {
+                if (st != null && st.isValid()) st.remove();
+                st = spawnMoneyStand(p);
+                moneyStands.put(p.getUniqueId(), st);
+            }
+            st.teleport(p.getLocation().add(0, 2.4, 0));
+            st.setCustomName(ChatColor.GREEN + "$" + balance(p.getUniqueId()));
+            st.setCustomNameVisible(!anon);
+        }
+    }
+
+    private void removeMoneyStand(UUID id) {
+        ArmorStand st = moneyStands.remove(id);
+        if (st != null && st.isValid()) st.remove();
+    }
+
+    // ---------- Tung Tung Sahur (admin only) ----------
+
+    private ItemStack tungBat() {
+        ItemStack it = new ItemStack(Material.STICK);
+        ItemMeta m = it.getItemMeta();
+        m.setDisplayName(ChatColor.RED + "Tung Bat");
+        m.setLore(List.of(ChatColor.GRAY + "Right-click: smash everyone nearby"));
+        m.getPersistentDataContainer().set(tungKey, PersistentDataType.BYTE, (byte) 1);
+        m.addAttributeModifier(Attribute.ATTACK_DAMAGE, new AttributeModifier(tungDamageKey,
+                getConfig().getDouble("tung.damage", 40), AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.HAND));
+        m.setUnbreakable(true);
+        it.setItemMeta(m);
+        return it;
+    }
+
+    private boolean isTungBat(ItemStack it) {
+        return it != null && it.hasItemMeta() && it.getItemMeta().getPersistentDataContainer().has(tungKey, PersistentDataType.BYTE);
+    }
+
+    private void becomeTung(CommandSender sender) {
+        if (!isAdmin(sender)) { sender.sendMessage(ChatColor.RED + "Operators only."); return; }
+        if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+        if (tungSavedMax.containsKey(p.getUniqueId())) {
+            endTung(p);
+            p.sendMessage(ChatColor.GREEN + "You are no longer Tung Tung Sahur.");
+            return;
+        }
+        AttributeInstance max = p.getAttribute(Attribute.GENERIC_MAX_HEALTH);
+        if (max == null) { p.sendMessage(ChatColor.RED + "Could not change your health."); return; }
+        tungSavedMax.put(p.getUniqueId(), max.getBaseValue());
+        max.setBaseValue(getConfig().getDouble("tung.max-health", 1000));
+        p.setHealth(max.getBaseValue());
+        p.getInventory().addItem(tungBat());
+        BossBar bar = Bukkit.createBossBar("Tung Tung Sahur", BarColor.RED, BarStyle.SEGMENTED_10);
+        tungBars.put(p.getUniqueId(), bar);
+        p.sendMessage(ChatColor.RED + "You are Tung Tung Sahur. Everyone within " + getConfig().getInt("tung.range", 300) + " blocks sees your boss bar.");
+    }
+
+    private void becomePlayerAgain(CommandSender sender) {
+        if (!isAdmin(sender)) { sender.sendMessage(ChatColor.RED + "Operators only."); return; }
+        if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+        if (!tungSavedMax.containsKey(p.getUniqueId())) {
+            p.sendMessage(ChatColor.YELLOW + "You are already a player.");
+            return;
+        }
+        endTung(p);
+        p.sendMessage(ChatColor.GREEN + "You are a player again.");
+    }
+
+    private void endTung(Player p) {
+        Double saved = tungSavedMax.remove(p.getUniqueId());
+        AttributeInstance max = p.getAttribute(Attribute.GENERIC_MAX_HEALTH);
+        if (saved != null && max != null) {
+            max.setBaseValue(saved);
+            if (p.getHealth() > max.getValue()) p.setHealth(max.getValue());
+        }
+        BossBar bar = tungBars.remove(p.getUniqueId());
+        if (bar != null) bar.removeAll();
+        ItemStack[] contents = p.getInventory().getContents();
+        for (int i = 0; i < contents.length; i++) {
+            if (isTungBat(contents[i])) p.getInventory().setItem(i, null);
+        }
+    }
+
+    /** Keeps the boss bar updated and shows it to everyone in range. */
+    private void tungTick() {
+        int range = getConfig().getInt("tung.range", 300);
+        for (Map.Entry<UUID, BossBar> en : new ArrayList<>(tungBars.entrySet())) {
+            Player boss = Bukkit.getPlayer(en.getKey());
+            BossBar bar = en.getValue();
+            if (boss == null) continue;
+            AttributeInstance max = boss.getAttribute(Attribute.GENERIC_MAX_HEALTH);
+            double maxHealth = max == null ? 1 : Math.max(1, max.getValue());
+            bar.setProgress(Math.max(0, Math.min(1, boss.getHealth() / maxHealth)));
+            for (Player viewer : Bukkit.getOnlinePlayers()) {
+                boolean inRange = viewer.getWorld().equals(boss.getWorld()) && viewer.getLocation().distance(boss.getLocation()) <= range;
+                if (inRange && !bar.getPlayers().contains(viewer)) bar.addPlayer(viewer);
+                if (!inRange && bar.getPlayers().contains(viewer)) bar.removePlayer(viewer);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onTungBatUse(PlayerInteractEvent e) {
+        if (e.getAction() != Action.RIGHT_CLICK_AIR && e.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        if (!isTungBat(e.getItem())) return;
+        e.setCancelled(true);
+        Player p = e.getPlayer();
+        long now = System.currentTimeMillis();
+        Long ready = tungCooldown.get(p.getUniqueId());
+        if (ready != null && now < ready) {
+            p.sendMessage(ChatColor.RED + "The Tung Bat is recharging.");
+            return;
+        }
+        tungCooldown.put(p.getUniqueId(), now + getConfig().getLong("tung.ability-cooldown-seconds", 8) * 1000L);
+        double radius = getConfig().getDouble("tung.ability-radius", 8);
+        double damage = getConfig().getDouble("tung.ability-damage", 20);
+        for (org.bukkit.entity.Entity en : p.getNearbyEntities(radius, radius, radius)) {
+            if (!(en instanceof org.bukkit.entity.LivingEntity target)) continue;
+            target.damage(damage, p);
+            target.setVelocity(new Vector(0, 1.0, 0));
+        }
+        p.getWorld().spawnParticle(org.bukkit.Particle.EXPLOSION, p.getLocation(), 1);
+    }
+
+    @EventHandler
+    public void onTungQuit(PlayerQuitEvent e) {
+        removeMoneyStand(e.getPlayer().getUniqueId());
+        for (BossBar bar : tungBars.values()) bar.removePlayer(e.getPlayer());
+    }
+
     // ---------- Chat ----------
 
     @EventHandler(priority = EventPriority.HIGH)
@@ -460,19 +668,23 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         Player sender = e.getPlayer();
         boolean anon = eventOn("anonymous");
         String tier = tiers.get(sender.getUniqueId());
-        Component tierPart;
-        if (anon || tier == null) {
-            tierPart = Component.empty();
-        } else {
+        String team = teams.get(sender.getUniqueId());
+        Component line = Component.text(anon ? "Anonymous" : sender.getName(), NamedTextColor.WHITE);
+        if (!anon && team != null) line = line.append(Component.text(" ", NamedTextColor.WHITE)).append(teamComponent(team));
+        if (!anon && tier != null) {
             TextColor colour = TextColor.fromHexString(getConfig().getString("tier-colors." + tier, "#FFFFFF"));
-            tierPart = Component.text(tier + " TIER ", colour == null ? NamedTextColor.WHITE : colour, TextDecoration.BOLD);
+            line = line.append(Component.text(" ", NamedTextColor.WHITE))
+                    .append(Component.text(tier + " TIER", colour == null ? NamedTextColor.WHITE : colour));
         }
-        final Component finalTier = tierPart;
-        Component name = Component.text(anon ? "Anonymous" : sender.getName(), NamedTextColor.WHITE, TextDecoration.BOLD);
-        e.renderer((source, displayName, message, viewer) -> finalTier
-                .append(name)
+        final Component finalLine = line;
+        e.renderer((source, displayName, message, viewer) -> finalLine
                 .append(Component.text(": ", NamedTextColor.WHITE))
                 .append(message));
+    }
+
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onAdvancement(PlayerAdvancementDoneEvent e) {
+        if (eventOn("anonymous")) e.message(null);
     }
 
     // ---------- Joining, leaving, kills ----------
@@ -500,14 +712,15 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     @EventHandler(priority = EventPriority.HIGH)
     public void onDeath(PlayerDeathEvent e) {
         Player victim = e.getEntity();
+        if (eventOn("anonymous")) e.deathMessage(Component.text("Someone was slain.", NamedTextColor.GRAY));
         Player killer = victim.getKiller();
         if (killer == null || killer.getUniqueId().equals(victim.getUniqueId())) return;
         long amount = stealAmount(tiers.get(victim.getUniqueId()));
         if (amount <= 0) return;
         setBalance(victim.getUniqueId(), balance(victim.getUniqueId()) - amount);
         setBalance(killer.getUniqueId(), balance(killer.getUniqueId()) + amount);
-        victim.sendMessage(ChatColor.RED + "" + ChatColor.BOLD + "You lost $" + amount + " to " + killer.getName() + ".");
-        killer.sendMessage(ChatColor.GREEN + "" + ChatColor.BOLD + "You stole $" + amount + " from " + victim.getName() + ".");
+        victim.sendMessage(ChatColor.RED + "You lost $" + amount + (eventOn("anonymous") ? "." : " to " + killer.getName() + "."));
+        killer.sendMessage(ChatColor.GREEN + "You stole $" + amount + (eventOn("anonymous") ? "." : " from " + victim.getName() + "."));
         refresh(victim);
         refresh(killer);
         saveData();
@@ -548,7 +761,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     // ---------- Capture the Flag ----------
 
-    private static final String FLAG_NAME = ChatColor.RED + "" + ChatColor.BOLD + "Flag";
+    private static final String FLAG_NAME = ChatColor.RED + "" + "" + "Flag";
     private static final int CTF_BASE_R = 4;
 
     private boolean isFlag(ItemStack it) {
@@ -625,14 +838,215 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     private void ctfCommand(CommandSender sender, String[] args) {
         if (!isAdmin(sender)) { sender.sendMessage(ChatColor.RED + "Operators only."); return; }
         String sub = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "";
-        if (sub.equals("setup")) {
-            if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
-            buildFlagTower(p);
-        } else if (sub.equals("reset")) {
-            returnFlag();
-            sender.sendMessage(ChatColor.GREEN + "The flag is back on the tower.");
+        switch (sub) {
+            case "setup" -> {
+                if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+                buildFlagTower(p);
+            }
+            case "reset" -> {
+                returnFlag();
+                sender.sendMessage(ChatColor.GREEN + "The flag is back on the tower.");
+            }
+            case "area" -> {
+                if (args.length < 4) { sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf area <generate|delete> <name>"); return; }
+                if (args[2].equalsIgnoreCase("generate")) {
+                    if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+                    generateCtfArea(p, args[3]);
+                } else if (args[2].equalsIgnoreCase("delete")) {
+                    deleteCtfArea(sender, args[3]);
+                } else {
+                    sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf area <generate|delete> <name>");
+                }
+            }
+            case "event" -> {
+                if (args.length < 4 || !args[2].equalsIgnoreCase("start")) { sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf event start <time>"); return; }
+                long secs = parseSeconds(args[3]);
+                if (secs <= 0) { sender.sendMessage(ChatColor.RED + "Time must be like 30m, 1h or 90s (up to 24h)."); return; }
+                if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+                if (!ctfAreaBuilt && !ctfAreaBusy) generateCtfArea(p, "ctf-arena");
+                eventEnds.put("ctf", System.currentTimeMillis() + secs * 1000L);
+                setEventState("ctf", true);
+                sender.sendMessage(ChatColor.GREEN + "Capture the flag is on for " + args[3] + ".");
+            }
+            default -> sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf <setup|reset|area|event>");
+        }
+    }
+
+    /** Time like 30m, 1h or 90s. A plain number means minutes. Returns -1 if it is not valid. */
+    private static long parseSeconds(String t) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+)([smh]?)").matcher(t.toLowerCase(Locale.ROOT));
+        if (!m.matches()) return -1;
+        try {
+            long v = Long.parseLong(m.group(1));
+            String unit = m.group(2);
+            long secs = unit.equals("s") ? v : (unit.equals("h") ? v * 3600L : v * 60L);
+            return secs > 0 && secs <= 86400L ? secs : -1;
+        } catch (NumberFormatException ex) {
+            return -1;
+        }
+    }
+
+    private File ctfAreaFile() {
+        return new File(getDataFolder(), "ctf-area-snapshot.txt");
+    }
+
+    /** Queues a mountain: the space above it is cleared first, then the mountain is built on the ground. */
+    private void queueMountain(List<BuildOp> ops, World w, int ox, int oy, int oz, int R, int H, int P) {
+        for (int x = -R - 2; x <= R + 2; x++) {
+            for (int z = -R - 2; z <= R + 2; z++) {
+                if (x * x + z * z > (R + 2) * (R + 2)) continue;
+                for (int y = 1; y <= H + 10; y++) ops.add(new BuildOp(w, ox + x, oy + y, oz + z, Material.AIR));
+            }
+        }
+        for (int x = -R; x <= R; x++) {
+            for (int z = -R; z <= R; z++) {
+                double d = Math.sqrt(x * x + z * z);
+                if (d > R) continue;
+                int h = d <= P ? H : (int) Math.round(H * Math.pow((R - d) / (double) (R - P), 1.4));
+                for (int y = 0; y < h; y++) {
+                    Material m = y == h - 1 ? Material.GRASS_BLOCK : (y >= h - 4 ? Material.DIRT : Material.STONE);
+                    ops.add(new BuildOp(w, ox + x, oy + y, oz + z, m));
+                }
+            }
+        }
+    }
+
+    /** Builds the flag tower at a given base (used on top of the CTF area). */
+    private void buildFlagTowerAt(World w, int ox, int oy, int oz) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int y = 0; y <= 5; y++) w.getBlockAt(ox + dx, oy + y, oz + dz).setType(Material.STONE_BRICKS, false);
+                w.getBlockAt(ox + dx, oy + 6, oz + dz).setType(Material.POLISHED_ANDESITE, false);
+            }
+        }
+        for (int y = 0; y <= 6; y++) {
+            Ladder ladder = (Ladder) Material.LADDER.createBlockData();
+            ladder.setFacing(BlockFace.NORTH);
+            w.getBlockAt(ox, oy + y, oz + 2).setBlockData(ladder, false);
+        }
+        ctfBuilt = true;
+        ctfWorld = w.getName();
+        ctfX = ox;
+        ctfY = oy;
+        ctfZ = oz;
+        placeFlagHome();
+    }
+
+    private void generateCtfArea(Player admin, String name) {
+        if (ctfAreaBuilt || ctfAreaBusy) {
+            admin.sendMessage(ChatColor.RED + "A CTF area already exists. Delete it first with /msmp ctf area delete <name>.");
+            return;
+        }
+        World w = admin.getWorld();
+        int ox = admin.getLocation().getBlockX();
+        int oz = admin.getLocation().getBlockZ();
+        int floorY = admin.getLocation().getBlockY() - 1;
+        while (floorY > w.getMinHeight() && w.getBlockAt(ox, floorY, oz).isPassable()) floorY--;
+        int oy = floorY + 1;
+        int R = CTF_AREA_R, H = CTF_AREA_H;
+        List<BuildOp> ops = new ArrayList<>();
+        queueMountain(ops, w, ox, oy, oz, R, H, CTF_PLATEAU);
+        List<String> snap = new ArrayList<>();
+        ctfAreaBusy = true;
+        runBatch(ops, snap, () -> {
+            try {
+                Files.write(ctfAreaFile().toPath(), snap);
+            } catch (IOException ex) {
+                getLogger().log(Level.SEVERE, "Could not save the CTF area snapshot.", ex);
+            }
+            ctfAreaWorld = w.getName();
+            ctfAreaX = ox;
+            ctfAreaY = oy;
+            ctfAreaZ = oz;
+            ctfAreaName = name;
+            ctfAreaBuilt = true;
+            ctfAreaBusy = false;
+            buildFlagTowerAt(w, ox, oy + H, oz);
+            saveData();
+            Bukkit.broadcastMessage(ChatColor.GOLD + "The CTF area " + name + " is ready.");
+        });
+        admin.sendMessage(ChatColor.GREEN + "Building the CTF area " + name + ". This runs in batches and takes a while.");
+    }
+
+    private void deleteCtfArea(CommandSender sender, String name) {
+        if (!ctfAreaBuilt || ctfAreaName == null || !ctfAreaName.equalsIgnoreCase(name)) {
+            sender.sendMessage(ChatColor.RED + "No CTF area named " + name + ".");
+            return;
+        }
+        if (eventOn("ctf")) {
+            setEventState("ctf", false);
         } else {
-            sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf <setup|reset>");
+            restoreCtfArea();
+        }
+        sender.sendMessage(ChatColor.GREEN + "Removing the CTF area. The ground is being restored.");
+    }
+
+    /** Restores the ground under the CTF area from its snapshot. Runs when the event ends or the area is deleted. */
+    private void restoreCtfArea() {
+        if (!ctfAreaBuilt) return;
+        returnFlag();
+        ctfBuilt = false;
+        ctfAreaBuilt = false;
+        saveData();
+        World w = ctfAreaWorld == null ? null : Bukkit.getWorld(ctfAreaWorld);
+        File f = ctfAreaFile();
+        if (w == null || !f.exists()) {
+            f.delete();
+            return;
+        }
+        restoreFile(f, w, () -> {
+            f.delete();
+            Bukkit.broadcastMessage(ChatColor.GOLD + "The CTF area has been removed and the ground restored.");
+        });
+    }
+
+    /** Puts saved blocks back from a snapshot file in batches. */
+    private void restoreFile(File f, World w, Runnable done) {
+        List<String> lines;
+        try {
+            lines = Files.readAllLines(f.toPath());
+        } catch (IOException ex) {
+            getLogger().log(Level.SEVERE, "Could not read a snapshot file.", ex);
+            return;
+        }
+        new BukkitRunnable() {
+            int i = 0;
+
+            @Override
+            public void run() {
+                int end = Math.min(lines.size(), i + BUILD_PER_TICK);
+                for (; i < end; i++) {
+                    String[] parts = lines.get(i).split(" ", 4);
+                    if (parts.length < 4) continue;
+                    try {
+                        w.getBlockAt(Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]))
+                                .setBlockData(Bukkit.createBlockData(parts[3]), false);
+                    } catch (IllegalArgumentException ex) {
+                        // Skip a line that doesn't parse.
+                    }
+                }
+                if (i >= lines.size()) {
+                    cancel();
+                    done.run();
+                }
+            }
+        }.runTaskTimer(this, 1L, 1L);
+    }
+
+    private boolean inCtfArea(Location l) {
+        if (!ctfAreaBuilt || ctfAreaWorld == null || l == null || l.getWorld() == null || !l.getWorld().getName().equals(ctfAreaWorld)) return false;
+        if (l.getBlockY() < ctfAreaY - 2 || l.getBlockY() > ctfAreaY + CTF_AREA_H + 12) return false;
+        return Math.hypot(l.getBlockX() - ctfAreaX, l.getBlockZ() - ctfAreaZ) <= CTF_AREA_R + 3;
+    }
+
+    /** Ends timed events when their time runs out. */
+    private void eventTimers() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Long> en : new ArrayList<>(eventEnds.entrySet())) {
+            if (now < en.getValue()) continue;
+            String key = en.getKey();
+            setEventState(key, false);
+            Bukkit.broadcastMessage(ChatColor.GOLD + pretty(key) + " has ended.");
         }
     }
 
@@ -743,7 +1157,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         b.setCenter(finaleX, finaleZ);
         b.setSize(finaleFinalSize, seconds);
         saveData();
-        Bukkit.broadcastMessage(ChatColor.RED + "" + ChatColor.BOLD + "The finale has started. The border is closing.");
+        Bukkit.broadcastMessage(ChatColor.RED + "" + "" + "The finale has started. The border is closing.");
     }
 
     private void finaleStop() {
@@ -985,31 +1399,31 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 int tz = cz + sz * tower;
                 for (int dx = -1; dx <= 1; dx++) {
                     for (int dz = -1; dz <= 1; dz++) {
-                        for (int y = 1; y <= 26; y++) put(w, tx + dx, by + y, tz + dz, Material.DEEPSLATE_TILES);
-                        put(w, tx + dx, by + 14, tz + dz, Material.POLISHED_DEEPSLATE);
-                        put(w, tx + dx, by + 27, tz + dz, Material.POLISHED_DEEPSLATE);
+                        for (int y = 1; y <= 12; y++) put(w, tx + dx, by + y, tz + dz, Material.DEEPSLATE_TILES);
+                        put(w, tx + dx, by + 6, tz + dz, Material.POLISHED_DEEPSLATE);
+                        put(w, tx + dx, by + 13, tz + dz, Material.POLISHED_DEEPSLATE);
                     }
                 }
                 for (int dx = -1; dx <= 1; dx++) {
                     for (int dz = -1; dz <= 1; dz++) {
                         if (dx == 0 && dz == 0) continue;
-                        put(w, tx + dx, by + 28, tz + dz, Material.COBBLESTONE_WALL);
+                        put(w, tx + dx, by + 14, tz + dz, Material.COBBLESTONE_WALL);
                     }
                 }
-                put(w, tx, by + 28, tz, Material.LANTERN);
+                put(w, tx, by + 14, tz, Material.LANTERN);
                 for (int dx = -2; dx <= 2; dx++) {
                     for (int dz = -2; dz <= 2; dz++) {
-                        if (Math.abs(dx) == 2 || Math.abs(dz) == 2) put(w, tx + dx, by + 15, tz + dz, Material.STONE_BRICK_SLAB);
+                        if (Math.abs(dx) == 2 || Math.abs(dz) == 2) put(w, tx + dx, by + 7, tz + dz, Material.STONE_BRICK_SLAB);
                     }
                 }
-                for (int y = 29; y <= 31; y++) put(w, tx, by + y, tz, Material.OAK_FENCE);
-                put(w, tx, by + 32, tz, banners[bi++ % banners.length]);
+                for (int y = 15; y <= 16; y++) put(w, tx, by + y, tz, Material.OAK_FENCE);
+                put(w, tx, by + 17, tz, banners[bi++ % banners.length]);
             }
         }
     }
 
     /** Builds one arena centred on (cx, by, cz) and sets the two spawns, as the StickDuels arenas do. */
-    private void buildGladiatorArena(Player admin, boolean sky) {
+    private void buildGladiatorArena(Player admin, boolean sky, String name) {
         World w = admin.getWorld();
         int cx = admin.getLocation().getBlockX();
         int cz = admin.getLocation().getBlockZ();
@@ -1025,6 +1439,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             glaSpawnB = b;
             glaCentre = new Location(w, cx, by, cz);
             glaSky = sky;
+            glaArenaName = name;
             saveData();
             Bukkit.broadcastMessage(ChatColor.GOLD + "The gladiator arena is ready.");
         });
@@ -1101,13 +1516,27 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             case "kits" -> sender.sendMessage(ChatColor.GOLD + "Gladiator kits: " + ChatColor.WHITE + String.join(", ", gladKits.keySet()));
             case "arena" -> {
                 if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
-                boolean sky = args.length >= 3 && args[2].equalsIgnoreCase("sky");
-                buildGladiatorArena(p, sky);
+                if (args.length < 4) { sender.sendMessage(ChatColor.RED + "Usage: /msmp gladiators arena <generate|delete> <name> [sky]"); return; }
+                String action = args[2].toLowerCase(Locale.ROOT);
+                if (action.equals("generate")) {
+                    boolean sky = args.length >= 5 && args[4].equalsIgnoreCase("sky");
+                    buildGladiatorArena(p, sky, args[3]);
+                } else if (action.equals("delete")) {
+                    deleteGladArena(sender, args[3]);
+                } else {
+                    sender.sendMessage(ChatColor.RED + "Usage: /msmp gladiators arena <generate|delete> <name> [sky]");
+                }
+            }
+            case "duel" -> {
+                if (args.length < 3 || !args[2].equalsIgnoreCase("confirm")) { sender.sendMessage(ChatColor.RED + "Usage: /msmp gladiators duel confirm"); return; }
+                if (!glaAwaitingConfirm) { sender.sendMessage(ChatColor.YELLOW + "No match is waiting to start."); return; }
+                glaAwaitingConfirm = false;
+                startMatch();
             }
             case "spin" -> {
                 if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
                 if (!eventOn("gladiators")) { p.sendMessage(ChatColor.RED + "Turn the gladiators event on first."); return; }
-                if (glaActive || glaSpinning) { p.sendMessage(ChatColor.RED + "A gladiator match is already running."); return; }
+                if (glaActive || glaSpinning || glaAwaitingConfirm) { p.sendMessage(ChatColor.RED + "A gladiator match is already running."); return; }
                 if (glaBuilding) { p.sendMessage(ChatColor.RED + "The arena is still being rebuilt."); return; }
                 if (gladKits.isEmpty()) { p.sendMessage(ChatColor.RED + "Add a kit first with /msmp gladiators addkit <name>."); return; }
                 if (glaSpawnA == null || glaSpawnB == null || glaTeamA == null || glaTeamB == null) {
@@ -1157,7 +1586,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 String kit = names.get((int) (Math.random() * names.size()));
                 ItemStack icon = new ItemStack(gladIcon(kit));
                 ItemMeta im = icon.getItemMeta();
-                im.setDisplayName(ChatColor.GOLD + "" + ChatColor.BOLD + kit);
+                im.setDisplayName(ChatColor.GOLD + "" + "" + kit);
                 icon.setItemMeta(im);
                 inv.setItem(13, icon);
                 for (Player viewer : Bukkit.getOnlinePlayers()) {
@@ -1170,7 +1599,8 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                     cancel();
                     glaKit = kit;
                     Bukkit.broadcastMessage(ChatColor.GOLD + "The kit is " + ChatColor.WHITE + kit + ChatColor.GOLD + "! Gladiators, get ready.");
-                    Bukkit.getScheduler().runTaskLater(StickmanMoneySMP.this, () -> startMatch(), 60L);
+                    glaAwaitingConfirm = true;
+                    Bukkit.broadcastMessage(ChatColor.GOLD + "An admin must start the match with /msmp gladiators duel confirm.");
                 }
             }
         }.runTaskTimer(this, 0L, 4L);
@@ -1214,7 +1644,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 }
                 if (n == 0) {
                     glaFighting = true;
-                    Bukkit.broadcastMessage(ChatColor.RED + "" + ChatColor.BOLD + "FIGHT!");
+                    Bukkit.broadcastMessage(ChatColor.RED + "" + "" + "FIGHT!");
                     cancel();
                     return;
                 }
@@ -1270,6 +1700,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         glaActive = false;
         glaFighting = false;
         glaSpinning = false;
+        glaAwaitingConfirm = false;
         String winnerTeam = null;
         if ("A".equals(winnerSide)) winnerTeam = glaTeamA;
         if ("B".equals(winnerSide)) winnerTeam = glaTeamB;
@@ -1283,7 +1714,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 setBalance(p.getUniqueId(), balance(p.getUniqueId()) + reward);
                 refresh(p);
             }
-            Bukkit.broadcastMessage(ChatColor.GREEN + "" + ChatColor.BOLD + winnerTeam + " won the gladiator match!");
+            Bukkit.broadcastMessage(ChatColor.GREEN + "" + "" + winnerTeam + " won the gladiator match!");
         } else {
             Bukkit.broadcastMessage(ChatColor.YELLOW + "The gladiator match was stopped.");
         }
@@ -1360,6 +1791,43 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         else if (!sideAlive(glaSideB)) endMatch("A");
     }
 
+    /** Removes the named gladiator arena: its blocks are cleared in batches, then it is forgotten. */
+    private void deleteGladArena(CommandSender sender, String name) {
+        if (glaCentre == null || glaArenaName == null || !glaArenaName.equalsIgnoreCase(name)) {
+            sender.sendMessage(ChatColor.RED + "No gladiator arena named " + name + ".");
+            return;
+        }
+        if (glaActive || glaSpinning || glaAwaitingConfirm) {
+            sender.sendMessage(ChatColor.RED + "End the gladiator match before deleting the arena.");
+            return;
+        }
+        World w = glaCentre.getWorld();
+        int cx = glaCentre.getBlockX(), by = glaCentre.getBlockY(), cz = glaCentre.getBlockZ();
+        int R = ARENA_R + 6;
+        int low = glaSky ? -16 : -1;
+        arenaQueue = new ArrayList<>();
+        for (int x = -R; x <= R; x++) {
+            for (int z = -R; z <= R; z++) {
+                if (x * x + z * z > R * R) continue;
+                for (int y = low; y <= 34; y++) arenaQueue.add(new ArenaOp(w, cx + x, by + y, cz + z, Material.AIR, null));
+            }
+        }
+        List<ArenaOp> ops = arenaQueue;
+        arenaQueue = new ArrayList<>();
+        glaBuilding = true;
+        runArenaBatch(ops, () -> {
+            glaBuilding = false;
+            glaCentre = null;
+            glaSpawnA = null;
+            glaSpawnB = null;
+            glaArenaName = null;
+            glaDirty = false;
+            saveData();
+            Bukkit.broadcastMessage(ChatColor.GOLD + "The gladiator arena has been deleted.");
+        });
+        sender.sendMessage(ChatColor.GREEN + "Deleting gladiator arena " + name + ". This runs in batches.");
+    }
+
     /** Rebuilds the gladiator arena from scratch, which clears cobwebs, dropped items and any damage. */
     private void resetGladArena() {
         if (glaCentre == null || glaCentre.getWorld() == null) return;
@@ -1391,7 +1859,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     /** Blocks that players can't break: mountain, flag tower or gladiator arena. */
     private boolean breakProtected(Location l) {
-        return protectedBlock(l) || inGladArena(l);
+        return protectedBlock(l) || inGladArena(l) || inCtfArea(l);
     }
 
     private boolean inGladMatch(UUID id) {
@@ -1484,7 +1952,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     private ItemStack rewardItem(String label, String path, long def) {
         ItemStack it = new ItemStack(Material.PAPER);
         ItemMeta m = it.getItemMeta();
-        m.setDisplayName(ChatColor.GOLD + "" + ChatColor.BOLD + label + ": $" + getConfig().getLong(path, def));
+        m.setDisplayName(ChatColor.GOLD + "" + "" + label + ": $" + getConfig().getLong(path, def));
         m.setLore(List.of(ChatColor.GRAY + "Left click: +10   Right click: -10",
                 ChatColor.GRAY + "Shift + left: +50   Shift + right: -50"));
         it.setItemMeta(m);
@@ -1501,7 +1969,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         inv.setItem(19, rewardItem("Unranked kill steal", "unranked-value", 0));
         ItemStack back = new ItemStack(Material.ARROW);
         ItemMeta bm = back.getItemMeta();
-        bm.setDisplayName(ChatColor.YELLOW + "" + ChatColor.BOLD + "Back");
+        bm.setDisplayName(ChatColor.YELLOW + "" + "" + "Back");
         back.setItemMeta(bm);
         inv.setItem(22, back);
         p.openInventory(inv);
@@ -1555,7 +2023,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         Inventory inv = Bukkit.createInventory(new MenuHolder(), 27, Component.text("Stickman MSMP"));
         ItemStack bal = new ItemStack(Material.PAPER);
         ItemMeta bm = bal.getItemMeta();
-        bm.setDisplayName(ChatColor.GREEN + "" + ChatColor.BOLD + "Your money: $" + balance(p.getUniqueId()));
+        bm.setDisplayName(ChatColor.GREEN + "" + "" + "Your money: $" + balance(p.getUniqueId()));
         bal.setItemMeta(bm);
         inv.setItem(4, bal);
         for (int i = 0; i < EVENT_KEYS.length && i < 8; i++) {
@@ -1563,7 +2031,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             boolean built = BUILT_EVENTS.contains(key);
             ItemStack item = new ItemStack(!built ? Material.BARRIER : eventOn(key) ? Material.LIME_DYE : Material.GRAY_DYE);
             ItemMeta im = item.getItemMeta();
-            im.setDisplayName((built && eventOn(key) ? ChatColor.GREEN : ChatColor.GRAY) + "" + ChatColor.BOLD + pretty(key)
+            im.setDisplayName((built && eventOn(key) ? ChatColor.GREEN : ChatColor.GRAY) + "" + "" + pretty(key)
                     + (!built ? " (not built yet)" : eventOn(key) ? " - ON" : " - OFF"));
             im.setLore(List.of(ChatColor.GRAY + (built ? "Operators: click to toggle" : "Saved, but nothing happens yet")));
             item.setItemMeta(im);
@@ -1571,7 +2039,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         }
         ItemStack rewards = new ItemStack(Material.PAPER);
         ItemMeta rm = rewards.getItemMeta();
-        rm.setDisplayName(ChatColor.GOLD + "" + ChatColor.BOLD + "Event rewards");
+        rm.setDisplayName(ChatColor.GOLD + "" + "" + "Event rewards");
         rm.setLore(List.of(ChatColor.GRAY + "Click to set how much money events give."));
         rewards.setItemMeta(rm);
         inv.setItem(22, rewards);
@@ -1607,6 +2075,14 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     @Override
     public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
+        if (cmd.getName().equalsIgnoreCase("becometungtung")) {
+            becomeTung(sender);
+            return true;
+        }
+        if (cmd.getName().equalsIgnoreCase("becomeplayeragain")) {
+            becomePlayerAgain(sender);
+            return true;
+        }
         if (args.length == 0 || args[0].equalsIgnoreCase("help")) {
             sendHelp(sender);
             return true;
@@ -1659,11 +2135,11 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             s.sendMessage(ChatColor.WHITE + "/msmp event <name> <on|off>" + ChatColor.GRAY + " - turn an event on or off");
             s.sendMessage(ChatColor.WHITE + "/msmp color <tier> <#RRGGBB>" + ChatColor.GRAY + " - change a tier colour");
             s.sendMessage(ChatColor.WHITE + "/msmp colors" + ChatColor.GRAY + " - list tier colours");
-            s.sendMessage(ChatColor.WHITE + "/msmp team <player> <name|none>" + ChatColor.GRAY + " - set a player's team");
+            s.sendMessage(ChatColor.WHITE + "/msmp team <create|add|player>" + ChatColor.GRAY + " - create or set teams");
             s.sendMessage(ChatColor.WHITE + "/msmp score <show|add|reset>" + ChatColor.GRAY + " - team points");
             s.sendMessage(ChatColor.WHITE + "/msmp ctf <setup|reset>" + ChatColor.GRAY + " - capture the flag tower");
             s.sendMessage(ChatColor.WHITE + "/msmp finale <area [finalSize]|duration <minutes>|status>" + ChatColor.GRAY + " - finale border settings");
-            s.sendMessage(ChatColor.WHITE + "/msmp gladiators <arena [sky]|setspawn a|b|teams A B|addkit <name>|removekit <name>|kits|spin|stop|status>" + ChatColor.GRAY + " - team kit fights");
+            s.sendMessage(ChatColor.WHITE + "/msmp gladiators <arena generate|delete <name>|setspawn a|b|teams A B|addkit|removekit|kits|spin|duel confirm|stop|status>" + ChatColor.GRAY + " - team kit fights");
             s.sendMessage(ChatColor.WHITE + "/msmp points <build|status|reset|time|rotate>" + ChatColor.GRAY + " - capture point mountain");
         }
     }
@@ -1916,6 +2392,10 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             getLogger().info("Finishing an interrupted capture point mountain restore.");
             restoreMountain();
         }
+        if (!ctfAreaBuilt && ctfAreaFile().exists()) {
+            World w = ctfAreaWorld == null ? null : Bukkit.getWorld(ctfAreaWorld);
+            if (w != null) restoreFile(ctfAreaFile(), w, () -> ctfAreaFile().delete());
+        }
         if (glaDirty && glaCentre != null && !glaActive) {
             getLogger().info("Rebuilding the gladiator arena after an interrupted reset.");
             resetGladArena();
@@ -1924,7 +2404,11 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     private void setEventState(String key, boolean on) {
         events.put(key, on);
-        if (key.equals("ctf") && !on) returnFlag();
+        if (!on) eventEnds.remove(key);
+        if (key.equals("ctf") && !on) {
+            returnFlag();
+            restoreCtfArea();
+        }
         if (key.equals("gladiators") && !on) endMatch(null);
         if (key.equals("finale")) {
             if (on) finaleStart();
@@ -2026,7 +2510,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     private void pointsCommand(CommandSender sender, String[] args) {
         if (!isAdmin(sender)) { sender.sendMessage(ChatColor.RED + "Operators only."); return; }
-        if (args.length < 2) { sender.sendMessage(ChatColor.RED + "Usage: /msmp points <build|status|reset|time|rotate>"); return; }
+        if (args.length < 2) { sender.sendMessage(ChatColor.RED + "Usage: /msmp points <build|status|reset|time|rotate|event>"); return; }
         switch (args[1].toLowerCase(Locale.ROOT)) {
             case "build" -> {
                 if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
@@ -2037,6 +2521,16 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 sender.sendMessage(ChatColor.GOLD + "Open set: " + (currentSet + 1) + " of 3. Captured: "
                         + (captured[0] ? "1" : "-") + (captured[1] ? "2" : "-") + (captured[2] ? "3" : "-")
                         + (captured[3] ? "4" : "-") + (captured[4] ? "5" : "-") + (captured[5] ? "6" : "-") + ".");
+            }
+            case "event" -> {
+                if (args.length < 4 || !args[2].equalsIgnoreCase("start")) { sender.sendMessage(ChatColor.RED + "Usage: /msmp points event start <time>"); return; }
+                long secs = parseSeconds(args[3]);
+                if (secs <= 0) { sender.sendMessage(ChatColor.RED + "Time must be like 30m, 1h or 90s (up to 24h)."); return; }
+                if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+                if (!capBuilt) buildMountain(p);
+                eventEnds.put("capture-points", System.currentTimeMillis() + secs * 1000L);
+                setEventState("capture-points", true);
+                sender.sendMessage(ChatColor.GREEN + "Capture points are on for " + args[3] + ".");
             }
             case "time" -> {
                 if (args.length < 3 || !args[2].matches("\\d+")) { sender.sendMessage(ChatColor.RED + "Usage: /msmp points time <minutes>"); return; }
@@ -2069,9 +2563,83 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         }
     }
 
+
+    private void teamColourCommand(CommandSender sender, String[] args) {
+        String team = args[1];
+        if (args.length < 5 || !args[3].equalsIgnoreCase("add")) {
+            sender.sendMessage(ChatColor.RED + "Usage: /msmp team <name> colour add <colour> [bold] [italic] [strikethrough]");
+            return;
+        }
+        String hex = args[4].startsWith("#") ? args[4].toUpperCase(Locale.ROOT) : COLOUR_NAMES.get(args[4].toLowerCase(Locale.ROOT));
+        if (hex == null || !hex.matches("#[0-9A-F]{6}")) {
+            sender.sendMessage(ChatColor.RED + "Colour must be a name (" + String.join(", ", COLOUR_NAMES.keySet()) + ") or hex like #FF69B4.");
+            return;
+        }
+        Set<String> styles = new HashSet<>();
+        for (int i = 5; i < args.length; i++) {
+            String st = args[i].toLowerCase(Locale.ROOT);
+            if (!st.equals("bold") && !st.equals("italic") && !st.equals("strikethrough")) {
+                sender.sendMessage(ChatColor.RED + "Styles are bold, italic and strikethrough.");
+                return;
+            }
+            styles.add(st);
+        }
+        teamColours.put(team, hex);
+        teamStyles.put(team, styles);
+        teamNames.add(team);
+        saveData();
+        for (Player p : Bukkit.getOnlinePlayers()) refresh(p);
+        sender.sendMessage(ChatColor.GREEN + "Team " + team + " colour set to " + hex + (styles.isEmpty() ? "" : " with " + String.join(", ", styles)) + ".");
+    }
+
+    /** The team name in its colour and styles, for the tab list and name tags. */
+    private String teamDisplay(String team) {
+        String hex = teamColours.get(team);
+        StringBuilder sb = new StringBuilder(hex == null ? ChatColor.WHITE.toString() : hexCode(hex));
+        Set<String> styles = teamStyles.getOrDefault(team, Set.of());
+        if (styles.contains("bold")) sb.append(ChatColor.BOLD);
+        if (styles.contains("italic")) sb.append(ChatColor.ITALIC);
+        if (styles.contains("strikethrough")) sb.append(ChatColor.STRIKETHROUGH);
+        return sb.append(team).append(ChatColor.RESET).toString();
+    }
+
+    /** The team name as a chat component, with its colour and styles. */
+    private Component teamComponent(String team) {
+        TextColor colour = teamColours.containsKey(team) ? TextColor.fromHexString(teamColours.get(team)) : null;
+        Component c = Component.text(team, colour == null ? NamedTextColor.WHITE : colour);
+        Set<String> styles = teamStyles.getOrDefault(team, Set.of());
+        if (styles.contains("bold")) c = c.decoration(TextDecoration.BOLD, true);
+        if (styles.contains("italic")) c = c.decoration(TextDecoration.ITALIC, true);
+        if (styles.contains("strikethrough")) c = c.decoration(TextDecoration.STRIKETHROUGH, true);
+        return c;
+    }
+
     private void teamCommand(CommandSender sender, String[] args) {
         if (!isAdmin(sender)) { sender.sendMessage(ChatColor.RED + "Operators only."); return; }
-        if (args.length < 3) { sender.sendMessage(ChatColor.RED + "Usage: /msmp team <player> <name|none>"); return; }
+        if (args.length < 2) {
+            sender.sendMessage(ChatColor.RED + "Usage: /msmp team create <name> | /msmp team add <player> <team> | /msmp team <player> <team|none>");
+            return;
+        }
+        if (args[1].equalsIgnoreCase("create")) {
+            if (args.length < 3) { sender.sendMessage(ChatColor.RED + "Usage: /msmp team create <name>"); return; }
+            teamNames.add(args[2]);
+            saveData();
+            sender.sendMessage(ChatColor.GREEN + "Team " + args[2] + " created.");
+            return;
+        }
+        if (args[1].equalsIgnoreCase("add")) {
+            if (args.length < 4) { sender.sendMessage(ChatColor.RED + "Usage: /msmp team add <player> <team>"); return; }
+            OfflinePlayer t = findPlayer(args[2]);
+            if (t == null) { sender.sendMessage(ChatColor.RED + "Unknown player."); return; }
+            teams.put(t.getUniqueId(), args[3]);
+            teamNames.add(args[3]);
+            if (t.getPlayer() != null) refresh(t.getPlayer());
+            saveData();
+            sender.sendMessage(ChatColor.GREEN + args[2] + " is now on team " + args[3] + ".");
+            return;
+        }
+        if (args.length >= 3 && args[2].equalsIgnoreCase("colour")) { teamColourCommand(sender, args); return; }
+        if (args.length < 3) { sender.sendMessage(ChatColor.RED + "Usage: /msmp team <player> <team|none>"); return; }
         OfflinePlayer t = findPlayer(args[1]);
         if (t == null) { sender.sendMessage(ChatColor.RED + "Unknown player."); return; }
         if (args[2].equalsIgnoreCase("none")) {
@@ -2079,6 +2647,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             sender.sendMessage(ChatColor.GREEN + args[1] + " is no longer on a team.");
         } else {
             teams.put(t.getUniqueId(), args[2]);
+            teamNames.add(args[2]);
             sender.sendMessage(ChatColor.GREEN + args[1] + " is now on team " + args[2] + ".");
         }
         if (t.getPlayer() != null) refresh(t.getPlayer());
@@ -2099,7 +2668,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         getConfig().set("tier-colors." + tier, hex);
         saveConfig();
         for (Player p : Bukkit.getOnlinePlayers()) refresh(p);
-        sender.sendMessage(hexCode(hex) + "" + ChatColor.BOLD + tier + " TIER" + ChatColor.RESET
+        sender.sendMessage(hexCode(hex) + "" + "" + tier + " TIER" + ChatColor.RESET
                 + ChatColor.GREEN + " colour set to " + hex + ".");
     }
 
@@ -2107,7 +2676,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         sender.sendMessage(ChatColor.GOLD + "--- Tier colours ---");
         for (String tier : TIERS) {
             String hex = getConfig().getString("tier-colors." + tier, "#FFFFFF");
-            sender.sendMessage(hexCode(hex) + "" + ChatColor.BOLD + tier + " TIER" + ChatColor.RESET
+            sender.sendMessage(hexCode(hex) + "" + "" + tier + " TIER" + ChatColor.RESET
                     + ChatColor.GRAY + " " + hex);
         }
     }
@@ -2128,24 +2697,120 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command cmd, String alias, String[] args) {
-        List<String> out = new ArrayList<>();
-        if (args.length == 1) {
-            List<String> subs = new ArrayList<>(List.of("balance", "pay", "help"));
-            if (isAdmin(sender)) subs.addAll(List.of("menu", "give", "take", "tier", "removetier", "event", "color", "colors", "team", "points", "score", "ctf", "finale", "gladiators"));
+        boolean admin = isAdmin(sender);
+        List<String> players = new ArrayList<>();
+        for (Player p : Bukkit.getOnlinePlayers()) players.add(p.getName());
+        List<String> teamList = new ArrayList<>(teamNames);
+        List<String> withNone = new ArrayList<>(teamList);
+        withNone.add("none");
+        int n = args.length;
+        if (n == 1) {
+            List<String> subs = new ArrayList<>(List.of("balance", "pay", "score", "help"));
+            if (admin) subs.addAll(List.of("menu", "give", "take", "tier", "removetier", "team", "color", "colors",
+                    "event", "points", "ctf", "finale", "gladiators"));
             return filter(subs, args[0]);
         }
         String sub = args[0].toLowerCase(Locale.ROOT);
-        if (args.length == 2 && (sub.equals("balance") || sub.equals("pay") || (isAdmin(sender) && List.of("give", "take", "tier", "removetier").contains(sub)))) {
-            for (Player p : Bukkit.getOnlinePlayers()) out.add(p.getName());
-            return filter(out, args[1]);
+        if (sub.equals("balance") || sub.equals("pay")) {
+            return n == 2 ? filter(players, args[1]) : List.of();
         }
-        if (args.length == 2 && isAdmin(sender) && sub.equals("color")) return filter(Arrays.asList(TIERS), args[1]);
-        if (args.length == 3 && isAdmin(sender) && (sub.equals("tier") || sub.equals("removetier"))) {
-            return filter(Arrays.asList(TIERS), args[2]);
+        if (sub.equals("score")) {
+            if (n == 2) return filter(List.of("show", "add", "reset"), args[1]);
+            if (n == 3 && admin && args[1].equalsIgnoreCase("add")) return filter(teamList, args[2]);
+            return List.of();
         }
-        if (args.length == 2 && isAdmin(sender) && sub.equals("event")) return filter(Arrays.asList(EVENT_KEYS), args[1]);
-        if (args.length == 3 && isAdmin(sender) && sub.equals("event")) return filter(List.of("on", "off"), args[2]);
-        return out;
+        if (!admin) return List.of();
+        switch (sub) {
+            case "give", "take" -> {
+                return n == 2 ? filter(players, args[1]) : List.of();
+            }
+            case "tier", "removetier" -> {
+                if (n == 2) return filter(players, args[1]);
+                if (n == 3) return filter(Arrays.asList(TIERS), args[2]);
+                return List.of();
+            }
+            case "team" -> {
+                if (n == 2) {
+                    List<String> opts = new ArrayList<>(List.of("create", "add"));
+                    opts.addAll(players);
+                    return filter(opts, args[1]);
+                }
+                if (args[1].equalsIgnoreCase("create")) return List.of();
+                if (args[1].equalsIgnoreCase("add")) {
+                    if (n == 3) return filter(players, args[2]);
+                    if (n == 4) return filter(teamList, args[3]);
+                    return List.of();
+                }
+                if (n == 3) {
+                    List<String> opts = new ArrayList<>(withNone);
+                    opts.add("colour");
+                    return filter(opts, args[2]);
+                }
+                if (n == 4 && args[2].equalsIgnoreCase("colour")) return filter(List.of("add"), args[3]);
+                if (n == 5 && args[2].equalsIgnoreCase("colour")) return filter(new ArrayList<>(COLOUR_NAMES.keySet()), args[4]);
+                if (n >= 6 && args[2].equalsIgnoreCase("colour")) return filter(List.of("bold", "italic", "strikethrough"), args[n - 1]);
+                return List.of();
+            }
+            case "color" -> {
+                return n == 2 ? filter(Arrays.asList(TIERS), args[1]) : List.of();
+            }
+            case "colors" -> {
+                return List.of();
+            }
+            case "event" -> {
+                if (n == 2) return filter(Arrays.asList(EVENT_KEYS), args[1]);
+                if (n == 3) return filter(List.of("on", "off"), args[2]);
+                return List.of();
+            }
+            case "points" -> {
+                if (n == 2) return filter(List.of("build", "status", "reset", "time", "rotate", "event"), args[1]);
+                if (n == 3 && args[1].equalsIgnoreCase("event")) return filter(List.of("start"), args[2]);
+                if (n == 4 && args[1].equalsIgnoreCase("event")) return filter(List.of("10m", "20m", "25m", "30m", "1h"), args[3]);
+                return List.of();
+            }
+            case "ctf" -> {
+                if (n == 2) return filter(List.of("setup", "reset", "area", "event"), args[1]);
+                String c = args[1].toLowerCase(Locale.ROOT);
+                if (c.equals("area")) {
+                    if (n == 3) return filter(List.of("generate", "delete"), args[2]);
+                    if (n == 4 && args[2].equalsIgnoreCase("delete") && ctfAreaName != null) return filter(List.of(ctfAreaName), args[3]);
+                    return List.of();
+                }
+                if (c.equals("event")) {
+                    if (n == 3) return filter(List.of("start"), args[2]);
+                    if (n == 4) return filter(List.of("10m", "20m", "25m", "30m", "1h"), args[3]);
+                }
+                return List.of();
+            }
+            case "finale" -> {
+                if (n == 2) return filter(List.of("area", "duration", "status"), args[1]);
+                return List.of();
+            }
+            case "menu" -> {
+                return List.of();
+            }
+            case "gladiators" -> {
+                if (n == 2) return filter(List.of("arena", "setspawn", "teams", "addkit", "removekit", "kits", "spin", "duel", "stop", "status"), args[1]);
+                String g = args[1].toLowerCase(Locale.ROOT);
+                if (g.equals("arena")) {
+                    if (n == 3) return filter(List.of("generate", "delete"), args[2]);
+                    if (n == 4 && args[2].equalsIgnoreCase("delete") && glaArenaName != null) return filter(List.of(glaArenaName), args[3]);
+                    if (n == 5 && args[2].equalsIgnoreCase("generate")) return filter(List.of("sky"), args[4]);
+                    return List.of();
+                }
+                if (g.equals("setspawn")) return n == 3 ? filter(List.of("a", "b"), args[2]) : List.of();
+                if (g.equals("teams")) {
+                    if (n == 3 || n == 4) return filter(teamList, args[n - 1]);
+                    return List.of();
+                }
+                if (g.equals("removekit")) return n == 3 ? filter(new ArrayList<>(gladKits.keySet()), args[2]) : List.of();
+                if (g.equals("duel")) return n == 3 ? filter(List.of("confirm"), args[2]) : List.of();
+                return List.of();
+            }
+            default -> {
+                return List.of();
+            }
+        }
     }
 
     private static List<String> filter(List<String> options, String prefix) {
