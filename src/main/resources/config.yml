@@ -1,1 +1,61 @@
+# StickmanMoneySMP configuration
 
+# Money every new player starts with.
+starting-balance: 100
+
+# Money stolen from a player with no tier when they are killed.
+unranked-value: 0
+
+# How much money changes hands when a player of this tier is killed.
+tier-values:
+  S: 40
+  A: 40
+  B: 30
+  C: 30
+  D: 20
+  F: 20
+
+# Colours for the tier names (hex).
+tier-colors:
+  S: "#FF69B4"   # pink
+  A: "#FFFF55"   # yellow
+  B: "#5555FF"   # blue
+  C: "#AAAAAA"   # gray
+  D: "#FFA500"   # orange
+  F: "#8B4513"   # brown
+
+# Double Dough: killing a player of this tier pays double.
+double-dough-tier: S
+
+# Events start switched off. Use /msmp event <name> <on|off> or /msmp menu.
+events:
+  capture-points: false
+  ctf: false
+  gladiators: false
+  finale: false
+  money-trees: false
+  anonymous: false
+  double-dough: false
+  opposite-day: false
+
+# Capture points. A team must hold a point alone for hold-minutes to capture it (5 to 10 is the usual range).
+# Change these in-game with /msmp points time <minutes> and /msmp points rotate <minutes>.
+capture-points:
+  hold-minutes: 10
+  rotate-minutes: 40
+  reward: 50
+
+# Gladiators: money and points for the winning team.
+gladiators:
+  reward: 50
+  points-win: 1
+
+# Finale: the world border closes to the finale area over duration-minutes.
+finale:
+  duration-minutes: 15
+  final-size: 100
+
+# Money trees: money per leaf broken, and the chance a hoe on leaves drops a golden apple.
+money-trees:
+  leaf-money: 2
+  apple-chance: 0.25

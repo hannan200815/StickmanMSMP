@@ -1,1 +1,14 @@
-
+name: StickmanMoneySMP
+version: 1.0.0
+main: com.stickmoney.StickmanMoneySMP
+api-version: '1.21'
+description: Money, tiers, kill stealing and events for the MSMP server.
+commands:
+  msmp:
+    description: Money SMP menu, balance, pay and admin commands
+    usage: /msmp help
+    aliases: [moneysmp]
+permissions:
+  stickmoney.admin:
+    description: Manage money, tiers and events
+    default: op
