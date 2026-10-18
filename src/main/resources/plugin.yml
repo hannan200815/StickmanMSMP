@@ -8,6 +8,14 @@ commands:
     description: Money SMP menu, balance, pay and admin commands
     usage: /msmp help
     aliases: [moneysmp]
+  becometungtung:
+    description: Become Tung Tung Sahur (admin only)
+    usage: /becometungtung
+    permission: stickmoney.admin
+  becomeplayeragain:
+    description: Stop being Tung Tung Sahur (admin only)
+    usage: /becomeplayeragain
+    permission: stickmoney.admin
 permissions:
   stickmoney.admin:
     description: Manage money, tiers and events

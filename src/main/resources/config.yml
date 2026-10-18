@@ -59,3 +59,12 @@ finale:
 money-trees:
   leaf-money: 2
   apple-chance: 0.25
+
+# Tung Tung Sahur (/becometungtung, admin only).
+tung:
+  max-health: 1000
+  damage: 40
+  range: 300
+  ability-radius: 8
+  ability-damage: 20
+  ability-cooldown-seconds: 8
