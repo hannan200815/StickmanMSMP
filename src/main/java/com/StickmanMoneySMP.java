@@ -363,9 +363,18 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         return base;
     }
 
+    /** Builds the Minecraft hex colour code for a value like #FF69B4 (Bukkit's ChatColor has no of() method). */
+    private static String hexCode(String hex) {
+        String h = hex.startsWith("#") ? hex.substring(1) : hex;
+        StringBuilder sb = new StringBuilder();
+        sb.append(ChatColor.COLOR_CHAR).append('x');
+        for (char c : h.toCharArray()) sb.append(ChatColor.COLOR_CHAR).append(c);
+        return sb.toString();
+    }
+
     private String tierPrefix(String tier) {
         String hex = getConfig().getString("tier-colors." + tier, "#FFFFFF");
-        return ChatColor.of(hex) + "" + ChatColor.BOLD + tier + " TIER " + ChatColor.RESET;
+        return hexCode(hex) + "" + ChatColor.BOLD + tier + " TIER " + ChatColor.RESET;
     }
 
     /** One scoreboard team per player, holding the tier (prefix) and money (suffix) above their name. */
@@ -2090,7 +2099,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         getConfig().set("tier-colors." + tier, hex);
         saveConfig();
         for (Player p : Bukkit.getOnlinePlayers()) refresh(p);
-        sender.sendMessage(ChatColor.of(hex) + "" + ChatColor.BOLD + tier + " TIER" + ChatColor.RESET
+        sender.sendMessage(hexCode(hex) + "" + ChatColor.BOLD + tier + " TIER" + ChatColor.RESET
                 + ChatColor.GREEN + " colour set to " + hex + ".");
     }
 
@@ -2098,7 +2107,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         sender.sendMessage(ChatColor.GOLD + "--- Tier colours ---");
         for (String tier : TIERS) {
             String hex = getConfig().getString("tier-colors." + tier, "#FFFFFF");
-            sender.sendMessage(ChatColor.of(hex) + "" + ChatColor.BOLD + tier + " TIER" + ChatColor.RESET
+            sender.sendMessage(hexCode(hex) + "" + ChatColor.BOLD + tier + " TIER" + ChatColor.RESET
                     + ChatColor.GRAY + " " + hex);
         }
     }
