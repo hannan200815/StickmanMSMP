@@ -558,7 +558,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         m.setDisplayName(ChatColor.RED + "Tung Bat");
         m.setLore(List.of(ChatColor.GRAY + "Right-click: smash everyone nearby"));
         m.getPersistentDataContainer().set(tungKey, PersistentDataType.BYTE, (byte) 1);
-        m.addAttributeModifier(Attribute.ATTACK_DAMAGE, new AttributeModifier(tungDamageKey,
+        m.addAttributeModifier(Attribute.GENERIC_ATTACK_DAMAGE, new AttributeModifier(tungDamageKey,
                 getConfig().getDouble("tung.damage", 40), AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.HAND));
         m.setUnbreakable(true);
         it.setItemMeta(m);
