@@ -124,6 +124,8 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     private String ctfAreaWorld, ctfAreaName;
     private int ctfAreaX, ctfAreaY, ctfAreaZ;
     private final Map<String, Long> eventEnds = new HashMap<>();
+    private final Map<String, Long> eventStarts = new HashMap<>();
+    private final Map<String, BossBar> eventBars = new HashMap<>();
     private final Map<UUID, Double> tungSavedMax = new HashMap<>();
     private final Map<UUID, BossBar> tungBars = new HashMap<>();
     private final Map<UUID, Long> tungCooldown = new HashMap<>();
@@ -205,6 +207,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     private final int[] progress = new int[6];
     private final String[] holder = new String[6];
     private boolean capBuilt;
+    private String capName;
     private String capWorld;
     private int capX, capY, capZ;
     private int currentSet;
@@ -306,12 +309,24 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             }
         }
         capBuilt = data.getBoolean("capture.built", false);
+        capName = data.getString("capture.name");
         capWorld = data.getString("capture.world");
         capX = data.getInt("capture.x");
         capY = data.getInt("capture.y");
         capZ = data.getInt("capture.z");
         currentSet = data.getInt("capture.set", 0);
         for (int i = 0; i < 6; i++) captured[i] = data.getBoolean("capture.captured." + i, false);
+        eventEnds.clear();
+        eventStarts.clear();
+        ConfigurationSection timerSec = data.getConfigurationSection("timers");
+        if (timerSec != null) {
+            for (String key : timerSec.getKeys(false)) {
+                ConfigurationSection t = timerSec.getConfigurationSection(key);
+                if (t == null) continue;
+                eventEnds.put(key, t.getLong("end"));
+                eventStarts.put(key, t.getLong("start"));
+            }
+        }
         scores.clear();
         ConfigurationSection scoreSec = data.getConfigurationSection("scores");
         if (scoreSec != null) {
@@ -369,7 +384,12 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         for (Map.Entry<UUID, String> en : tiers.entrySet()) out.set("tiers." + en.getKey(), en.getValue());
         for (Map.Entry<String, Boolean> en : events.entrySet()) out.set("events." + en.getKey(), en.getValue());
         for (Map.Entry<UUID, String> en : teams.entrySet()) out.set("teams." + en.getKey(), en.getValue());
+        for (Map.Entry<String, Long> en : eventEnds.entrySet()) {
+            out.set("timers." + en.getKey() + ".end", en.getValue());
+            out.set("timers." + en.getKey() + ".start", eventStarts.getOrDefault(en.getKey(), en.getValue()));
+        }
         out.set("capture.built", capBuilt);
+        out.set("capture.name", capName);
         out.set("capture.world", capWorld);
         out.set("capture.x", capX);
         out.set("capture.y", capY);
@@ -462,9 +482,59 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         return sb.toString();
     }
 
+    private static final String[] TEAM_PALETTE = {"#55FFFF", "#FF55FF", "#55FF55", "#FFAA00", "#5555FF", "#FF5555", "#FFFF55", "#FF69B4"};
+
+    /** The colour for a team: the one set with /msmp team <name> colour add, or a fixed colour picked from its name. */
+    private String teamHex(String team) {
+        String hex = teamColours.get(team);
+        if (hex != null) return hex;
+        return TEAM_PALETTE[Math.abs(team.hashCode()) % TEAM_PALETTE.length];
+    }
+
+    /** Each letter fades from the base colour toward white and back, brightest in the middle: a shiny look. */
+    private static int shineChannel(int base, double shine) {
+        return (int) Math.round(base + (255 - base) * shine);
+    }
+
+    private static double shineAmount(int index, int length) {
+        if (length <= 1) return 0.6;
+        double t = index / (double) (length - 1);
+        return 0.25 + 0.6 * (1 - Math.abs(2 * t - 1));
+    }
+
+    /** Legacy (tab list and name tag) shiny bold text. */
+    private String shinyLegacy(String text, String hex) {
+        String h = hex.startsWith("#") ? hex.substring(1) : hex;
+        int r = Integer.parseInt(h.substring(0, 2), 16);
+        int g = Integer.parseInt(h.substring(2, 4), 16);
+        int b = Integer.parseInt(h.substring(4, 6), 16);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            double shine = shineAmount(i, text.length());
+            String code = String.format("#%02X%02X%02X", shineChannel(r, shine), shineChannel(g, shine), shineChannel(b, shine));
+            sb.append(hexCode(code)).append(ChatColor.BOLD).append(text.charAt(i));
+        }
+        return sb.append(ChatColor.RESET).toString();
+    }
+
+    /** Chat shiny bold text. */
+    private Component shinyComponent(String text, String hex) {
+        String h = hex.startsWith("#") ? hex.substring(1) : hex;
+        int r = Integer.parseInt(h.substring(0, 2), 16);
+        int g = Integer.parseInt(h.substring(2, 4), 16);
+        int b = Integer.parseInt(h.substring(4, 6), 16);
+        Component out = Component.empty();
+        for (int i = 0; i < text.length(); i++) {
+            double shine = shineAmount(i, text.length());
+            TextColor colour = TextColor.color(shineChannel(r, shine), shineChannel(g, shine), shineChannel(b, shine));
+            out = out.append(Component.text(String.valueOf(text.charAt(i)), colour).decoration(TextDecoration.BOLD, true));
+        }
+        return out;
+    }
+
     private String tierPrefix(String tier) {
         String hex = getConfig().getString("tier-colors." + tier, "#FFFFFF");
-        return hexCode(hex) + "" + "" + tier + " TIER " + ChatColor.RESET;
+        return shinyLegacy(tier + " TIER", hex) + " ";
     }
 
     /** One scoreboard team per player, holding the tier (prefix) and money (suffix) above their name. */
@@ -539,9 +609,11 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 st = spawnMoneyStand(p);
                 moneyStands.put(p.getUniqueId(), st);
             }
-            st.teleport(p.getLocation().add(0, 2.4, 0));
-            st.setCustomName(ChatColor.GREEN + "$" + balance(p.getUniqueId()));
-            st.setCustomNameVisible(!anon);
+            Location above = p.getLocation().add(0, 2.4, 0);
+            if (st.getLocation().distance(above) > 3) st.teleport(above);
+            String want = ChatColor.GREEN + "$" + balance(p.getUniqueId());
+            if (!want.equals(st.getCustomName())) st.setCustomName(want);
+            if (st.isCustomNameVisible() == anon) st.setCustomNameVisible(!anon);
         }
     }
 
@@ -674,7 +746,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         if (!anon && tier != null) {
             TextColor colour = TextColor.fromHexString(getConfig().getString("tier-colors." + tier, "#FFFFFF"));
             line = line.append(Component.text(" ", NamedTextColor.WHITE))
-                    .append(Component.text(tier + " TIER", colour == null ? NamedTextColor.WHITE : colour));
+                    .append(shinyComponent(tier + " TIER", getConfig().getString("tier-colors." + tier, "#FFFFFF")));
         }
         final Component finalLine = line;
         e.renderer((source, displayName, message, viewer) -> finalLine
@@ -858,14 +930,28 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                     sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf area <generate|delete> <name>");
                 }
             }
+            case "start" -> {
+                long secs = args.length >= 3 ? parseSeconds(args[2]) : 1800L;
+                if (secs <= 0) { sender.sendMessage(ChatColor.RED + "Time must be like 30m, 1h or 90s (up to 24h)."); return; }
+                if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+                if (!ctfAreaBuilt && !ctfAreaBusy) generateCtfArea(p, "ctf-arena");
+                startTimed("ctf", secs);
+                sender.sendMessage(ChatColor.GREEN + "Capture the flag is on for " + (secs / 60) + " minutes.");
+            }
+            case "status" -> sender.sendMessage(ChatColor.GOLD + "CTF area: " + (ctfAreaBuilt ? ctfAreaName : "none")
+                    + ", event: " + (eventOn("ctf") ? "on, " + timeLeftText("ctf") : "off") + ".");
+            case "stop" -> {
+                eventEnds.remove("ctf");
+                setEventState("ctf", false);
+                sender.sendMessage(ChatColor.GREEN + "Capture the flag is off.");
+            }
             case "event" -> {
                 if (args.length < 4 || !args[2].equalsIgnoreCase("start")) { sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf event start <time>"); return; }
                 long secs = parseSeconds(args[3]);
                 if (secs <= 0) { sender.sendMessage(ChatColor.RED + "Time must be like 30m, 1h or 90s (up to 24h)."); return; }
                 if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
                 if (!ctfAreaBuilt && !ctfAreaBusy) generateCtfArea(p, "ctf-arena");
-                eventEnds.put("ctf", System.currentTimeMillis() + secs * 1000L);
-                setEventState("ctf", true);
+                startTimed("ctf", secs);
                 sender.sendMessage(ChatColor.GREEN + "Capture the flag is on for " + args[3] + ".");
             }
             default -> sender.sendMessage(ChatColor.RED + "Usage: /msmp ctf <setup|reset|area|event>");
@@ -905,6 +991,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 int h = d <= P ? H : (int) Math.round(H * Math.pow((R - d) / (double) (R - P), 1.4));
                 for (int y = 0; y < h; y++) {
                     Material m = y == h - 1 ? Material.GRASS_BLOCK : (y >= h - 4 ? Material.DIRT : Material.STONE);
+                    if (y == h - 1 && d <= P && x % 8 == 0 && z % 8 == 0) m = Material.SEA_LANTERN;
                     ops.add(new BuildOp(w, ox + x, oy + y, oz + z, m));
                 }
             }
@@ -984,6 +1071,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     /** Restores the ground under the CTF area from its snapshot. Runs when the event ends or the area is deleted. */
     private void restoreCtfArea() {
         if (!ctfAreaBuilt) return;
+        playerPlaced.clear();
         returnFlag();
         ctfBuilt = false;
         ctfAreaBuilt = false;
@@ -1039,14 +1127,47 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         return Math.hypot(l.getBlockX() - ctfAreaX, l.getBlockZ() - ctfAreaZ) <= CTF_AREA_R + 3;
     }
 
+    /** Starts a timed event for everyone: turns it on, shows a title, and runs its timer. */
+    private void startTimed(String key, long secs) {
+        long now = System.currentTimeMillis();
+        eventStarts.put(key, now);
+        eventEnds.put(key, now + secs * 1000L);
+        setEventState(key, true);
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            p.sendTitle(ChatColor.GOLD + pretty(key), ChatColor.YELLOW + "Started for " + (secs / 60) + " minutes", 10, 60, 10);
+        }
+    }
+
+    private static String formatTime(long ms) {
+        long total = Math.max(0, ms / 1000L);
+        return String.format("%02d:%02d", total / 60, total % 60);
+    }
+
+    /** Time left for a running timed event, or "off". */
+    private String timeLeftText(String key) {
+        Long end = eventEnds.get(key);
+        if (end == null || !eventOn(key)) return "off";
+        return formatTime(end - System.currentTimeMillis()) + " left";
+    }
+
     /** Ends timed events when their time runs out. */
     private void eventTimers() {
         long now = System.currentTimeMillis();
         for (Map.Entry<String, Long> en : new ArrayList<>(eventEnds.entrySet())) {
-            if (now < en.getValue()) continue;
             String key = en.getKey();
-            setEventState(key, false);
-            Bukkit.broadcastMessage(ChatColor.GOLD + pretty(key) + " has ended.");
+            long left = en.getValue() - now;
+            if (left <= 0) {
+                setEventState(key, false);
+                Bukkit.broadcastMessage(ChatColor.GOLD + pretty(key) + " has ended.");
+                continue;
+            }
+            long total = Math.max(1L, en.getValue() - eventStarts.getOrDefault(key, now));
+            BossBar bar = eventBars.computeIfAbsent(key, k -> Bukkit.createBossBar(pretty(k), BarColor.YELLOW, BarStyle.SOLID));
+            bar.setProgress(Math.max(0, Math.min(1, left / (double) total)));
+            bar.setTitle(ChatColor.YELLOW + pretty(key) + " - " + formatTime(left));
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (!bar.getPlayers().contains(p)) bar.addPlayer(p);
+            }
         }
     }
 
@@ -1830,6 +1951,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     /** Rebuilds the gladiator arena from scratch, which clears cobwebs, dropped items and any damage. */
     private void resetGladArena() {
+        playerPlaced.clear();
         if (glaCentre == null || glaCentre.getWorld() == null) return;
         World w = glaCentre.getWorld();
         glaBuilding = true;
@@ -1921,12 +2043,13 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onMountainBreak(BlockBreakEvent e) {
-        if (breakProtected(e.getBlock().getLocation())) e.setCancelled(true);
+        Location l = e.getBlock().getLocation();
+        if (breakProtected(l) && !playerPlaced.remove(posKey(l))) e.setCancelled(true);
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onProtectedPlace(BlockPlaceEvent e) {
-        if (protectedBlock(e.getBlock().getLocation())) e.setCancelled(true);
+        if (breakProtected(e.getBlock().getLocation())) playerPlaced.add(posKey(e.getBlock().getLocation()));
     }
 
     @EventHandler(priority = EventPriority.HIGH)
@@ -2111,7 +2234,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             case "event" -> event(sender, args);
             case "color" -> tierColor(sender, args);
             case "colors" -> listColors(sender);
-            case "points" -> pointsCommand(sender, args);
+            case "points", "ctp" -> pointsCommand(sender, args);
             case "team" -> teamCommand(sender, args);
             case "score" -> scoreCommand(sender, args);
             case "ctf" -> ctfCommand(sender, args);
@@ -2267,7 +2390,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         return new File(getDataFolder(), "mountain-snapshot.txt");
     }
 
-    private void buildMountain(Player admin) {
+    private void buildMountain(Player admin, String name) {
         if (capBuilt) {
             admin.sendMessage(ChatColor.RED + "A mountain is already built. Turn the event off to restore the ground first.");
             return;
@@ -2294,6 +2417,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 int h = d <= P ? H : (int) Math.round(H * Math.pow((R - d) / (double) (R - P), 1.4));
                 for (int y = 0; y < h; y++) {
                     Material m = y == h - 1 ? Material.GRASS_BLOCK : (y >= h - 4 ? Material.DIRT : Material.STONE);
+                    if (y == h - 1 && d <= P && x % 8 == 0 && z % 8 == 0) m = Material.SEA_LANTERN;
                     ops.add(new BuildOp(w, ox + x, oy + y, oz + z, m));
                 }
             }
@@ -2309,6 +2433,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
             capX = ox;
             capY = oy;
             capZ = oz;
+            capName = name;
             capBuilt = true;
             Arrays.fill(captured, false);
             Arrays.fill(progress, 0);
@@ -2323,7 +2448,15 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
     }
 
     /** Puts back the original ground from the snapshot, then clears the mountain state. */
+    /** Blocks players placed inside event areas. Only these can be broken. */
+    private final Set<String> playerPlaced = new HashSet<>();
+
+    private static String posKey(Location l) {
+        return l.getWorld().getName() + ":" + l.getBlockX() + "," + l.getBlockY() + "," + l.getBlockZ();
+    }
+
     private void restoreMountain() {
+        playerPlaced.clear();
         File f = snapshotFile();
         capBuilt = false;
         Arrays.fill(captured, false);
@@ -2404,7 +2537,12 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     private void setEventState(String key, boolean on) {
         events.put(key, on);
-        if (!on) eventEnds.remove(key);
+        if (!on) {
+            eventEnds.remove(key);
+            eventStarts.remove(key);
+            BossBar bar = eventBars.remove(key);
+            if (bar != null) bar.removeAll();
+        }
         if (key.equals("ctf") && !on) {
             returnFlag();
             restoreCtfArea();
@@ -2426,7 +2564,11 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         for (int i = 0; i < 6; i++) {
             int[] pos = pointPos(i);
             Material m = captured[i] ? Material.LIME_CONCRETE : (activePoint(i) ? Material.YELLOW_CONCRETE : Material.GRAY_CONCRETE);
-            w.getBlockAt(pos[0], pos[1], pos[2]).setType(m, false);
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    w.getBlockAt(pos[0] + dx, pos[1], pos[2] + dz).setType(m, false);
+                }
+            }
         }
     }
 
@@ -2512,9 +2654,37 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         if (!isAdmin(sender)) { sender.sendMessage(ChatColor.RED + "Operators only."); return; }
         if (args.length < 2) { sender.sendMessage(ChatColor.RED + "Usage: /msmp points <build|status|reset|time|rotate|event>"); return; }
         switch (args[1].toLowerCase(Locale.ROOT)) {
+            case "area" -> {
+                if (args.length < 4) { sender.sendMessage(ChatColor.RED + "Usage: /msmp ctp area <generate|delete> <name>"); return; }
+                if (args[2].equalsIgnoreCase("generate")) {
+                    if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+                    if (capBuilt) { sender.sendMessage(ChatColor.RED + "A capture point area already exists. Delete it first."); return; }
+                    buildMountain(p, args[3]);
+                } else if (args[2].equalsIgnoreCase("delete")) {
+                    if (!capBuilt || capName == null || !capName.equalsIgnoreCase(args[3])) { sender.sendMessage(ChatColor.RED + "No capture point area named " + args[3] + "."); return; }
+                    if (eventOn("capture-points")) setEventState("capture-points", false);
+                    else restoreMountain();
+                    sender.sendMessage(ChatColor.GREEN + "Removing the capture point area. The ground is being restored.");
+                } else {
+                    sender.sendMessage(ChatColor.RED + "Usage: /msmp ctp area <generate|delete> <name>");
+                }
+            }
+            case "start" -> {
+                long secs = args.length >= 3 ? parseSeconds(args[2]) : 600L;
+                if (secs <= 0) { sender.sendMessage(ChatColor.RED + "Time must be like 30m, 1h or 90s (up to 24h)."); return; }
+                if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
+                if (!capBuilt) buildMountain(p, "ctp-arena");
+                startTimed("capture-points", secs);
+                sender.sendMessage(ChatColor.GREEN + "Capture points are on for " + (secs / 60) + " minutes.");
+            }
+            case "stop" -> {
+                eventEnds.remove("capture-points");
+                setEventState("capture-points", false);
+                sender.sendMessage(ChatColor.GREEN + "Capture points are off.");
+            }
             case "build" -> {
                 if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
-                buildMountain(p);
+                buildMountain(p, "ctp-arena");
             }
             case "status" -> {
                 if (!capBuilt) { sender.sendMessage(ChatColor.YELLOW + "No mountain built yet. Use /msmp points build."); return; }
@@ -2527,9 +2697,8 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 long secs = parseSeconds(args[3]);
                 if (secs <= 0) { sender.sendMessage(ChatColor.RED + "Time must be like 30m, 1h or 90s (up to 24h)."); return; }
                 if (!(sender instanceof Player p)) { sender.sendMessage("Players only."); return; }
-                if (!capBuilt) buildMountain(p);
-                eventEnds.put("capture-points", System.currentTimeMillis() + secs * 1000L);
-                setEventState("capture-points", true);
+                if (!capBuilt) buildMountain(p, "ctp-arena");
+                startTimed("capture-points", secs);
                 sender.sendMessage(ChatColor.GREEN + "Capture points are on for " + args[3] + ".");
             }
             case "time" -> {
@@ -2594,10 +2763,8 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     /** The team name in its colour and styles, for the tab list and name tags. */
     private String teamDisplay(String team) {
-        String hex = teamColours.get(team);
-        StringBuilder sb = new StringBuilder(hex == null ? ChatColor.WHITE.toString() : hexCode(hex));
+        StringBuilder sb = new StringBuilder(shinyLegacy(team, teamHex(team)));
         Set<String> styles = teamStyles.getOrDefault(team, Set.of());
-        if (styles.contains("bold")) sb.append(ChatColor.BOLD);
         if (styles.contains("italic")) sb.append(ChatColor.ITALIC);
         if (styles.contains("strikethrough")) sb.append(ChatColor.STRIKETHROUGH);
         return sb.append(team).append(ChatColor.RESET).toString();
@@ -2605,13 +2772,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
 
     /** The team name as a chat component, with its colour and styles. */
     private Component teamComponent(String team) {
-        TextColor colour = teamColours.containsKey(team) ? TextColor.fromHexString(teamColours.get(team)) : null;
-        Component c = Component.text(team, colour == null ? NamedTextColor.WHITE : colour);
-        Set<String> styles = teamStyles.getOrDefault(team, Set.of());
-        if (styles.contains("bold")) c = c.decoration(TextDecoration.BOLD, true);
-        if (styles.contains("italic")) c = c.decoration(TextDecoration.ITALIC, true);
-        if (styles.contains("strikethrough")) c = c.decoration(TextDecoration.STRIKETHROUGH, true);
-        return c;
+        return shinyComponent(team, teamHex(team));
     }
 
     private void teamCommand(CommandSender sender, String[] args) {
@@ -2707,7 +2868,7 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
         if (n == 1) {
             List<String> subs = new ArrayList<>(List.of("balance", "pay", "score", "help"));
             if (admin) subs.addAll(List.of("menu", "give", "take", "tier", "removetier", "team", "color", "colors",
-                    "event", "points", "ctf", "finale", "gladiators"));
+                    "event", "points", "ctp", "ctf", "finale", "gladiators"));
             return filter(subs, args[0]);
         }
         String sub = args[0].toLowerCase(Locale.ROOT);
@@ -2762,14 +2923,18 @@ public final class StickmanMoneySMP extends JavaPlugin implements Listener, Comm
                 if (n == 3) return filter(List.of("on", "off"), args[2]);
                 return List.of();
             }
-            case "points" -> {
-                if (n == 2) return filter(List.of("build", "status", "reset", "time", "rotate", "event"), args[1]);
+            case "points", "ctp" -> {
+                if (n == 2) return filter(List.of("area", "start", "stop", "build", "status", "reset", "time", "rotate", "event"), args[1]);
+                if (n == 3 && args[1].equalsIgnoreCase("area")) return filter(List.of("generate", "delete"), args[2]);
+                if (n == 3 && (args[1].equalsIgnoreCase("start") || args[1].equalsIgnoreCase("event"))) return filter(List.of("10m", "20m", "30m"), args[2]);
+                if (n == 4 && args[1].equalsIgnoreCase("event")) return filter(List.of("start"), args[3]);
                 if (n == 3 && args[1].equalsIgnoreCase("event")) return filter(List.of("start"), args[2]);
                 if (n == 4 && args[1].equalsIgnoreCase("event")) return filter(List.of("10m", "20m", "25m", "30m", "1h"), args[3]);
                 return List.of();
             }
             case "ctf" -> {
-                if (n == 2) return filter(List.of("setup", "reset", "area", "event"), args[1]);
+                if (n == 2) return filter(List.of("setup", "reset", "area", "start", "stop", "event"), args[1]);
+                if (n == 3 && args[1].equalsIgnoreCase("start")) return filter(List.of("10m", "20m", "30m", "1h"), args[2]);
                 String c = args[1].toLowerCase(Locale.ROOT);
                 if (c.equals("area")) {
                     if (n == 3) return filter(List.of("generate", "delete"), args[2]);
